@@ -1,0 +1,82 @@
+---
+title: "Intro to Data Vis HW 2"
+output: html_notebook
+---
+
+```{r setup}
+require(data.table)
+require(magrittr)
+require(tidyverse)
+require(ggthemes)
+require(ggthemr)
+require(h2o)
+
+# Initialize h2o
+h2o.init()
+```
+
+```{r load data}
+home_train <- fread("../data/train.csv")
+home_test <- fread("../data/test.csv")  # Missing response - used for Kaggle submission
+
+names(home_train)
+# Remove id column from home_train
+home_train[,Id := NULL]
+```
+
+
+## Introduction
+## EDA
+```{r}
+# Number of discrete and continuous features
+sapply(home_train, class) %>% 
+  table
+
+# Define dependent variable
+y <- "SalePrice"
+
+# Extract names of continuous features
+cont_features <- names(home_train)[sapply(home_train, class) == "integer"]
+cont_features <- setdiff(cont_features, y)
+
+# Extract names of discrete features
+disc_features <- names(home_train)[sapply(home_train, class) == "character"]
+```
+
+```{r discrete features}
+# Count of distinct values in each discrete feature
+home_train[,disc_features, with = FALSE] %>% 
+  melt(measure.vars = disc_features) %>% 
+  ggplot(aes(x = value)) +
+  geom_bar() +
+  facet_wrap(~variable, scales = "free") +
+  theme_minimal() +
+  theme(axis.text.x = element_blank())
+
+# Boxplot of response variable for discrete features
+home_train[,c(disc_features, y), with = FALSE] %>% 
+  melt(measure.vars = disc_features) %>% 
+  ggplot(aes(x = value, y = SalePrice)) +
+  geom_boxplot() +
+  facet_wrap(~variable, scales = "free") +
+  theme_tufte() +
+  theme(axis.text.x = element_blank(),
+        axis.text.y = element_blank())
+```
+
+```{r continuous features}
+
+```
+
+
+
+
+## Feature Engineering
+## Data Modeling
+Limited number of observations. Cross validation will be used to maximize training potential.
+```{r h2o setup}
+
+```
+
+## Kaggle Submission
+
