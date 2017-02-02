@@ -4,11 +4,15 @@ output: html_notebook
 ---
 
 ```{r setup}
+knitr::opts_chunk$set(fig.width = 20, fig.height = 17)
+
 require(data.table)
 require(magrittr)
 require(tidyverse)
 require(ggthemes)
 require(ggthemr)
+require(corrr)
+require(VIM)
 require(h2o)
 
 # Initialize h2o
@@ -41,6 +45,9 @@ cont_features <- setdiff(cont_features, y)
 
 # Extract names of discrete features
 disc_features <- names(home_train)[sapply(home_train, class) == "character"]
+
+# Explore missingness of data
+aggr(home_train[,-y, with = FALSE])
 ```
 
 ```{r discrete features}
@@ -48,24 +55,52 @@ disc_features <- names(home_train)[sapply(home_train, class) == "character"]
 home_train[,disc_features, with = FALSE] %>% 
   melt(measure.vars = disc_features) %>% 
   ggplot(aes(x = value)) +
-  geom_bar() +
+  geom_bar(na.rm = FALSE) +
   facet_wrap(~variable, scales = "free") +
-  theme_minimal() +
-  theme(axis.text.x = element_blank())
+  theme_tufte() +
+  theme(axis.text.y = element_blank(),
+        axis.text.x = element_text(angle = 45))
 
 # Boxplot of response variable for discrete features
+give_n <- function(x){ return(c(ymin = median, label = length(x))) }
+
 home_train[,c(disc_features, y), with = FALSE] %>% 
   melt(measure.vars = disc_features) %>% 
   ggplot(aes(x = value, y = SalePrice)) +
   geom_boxplot() +
+  # stat_summary(fun.data = give_n, geom = "text", fun.y= median) +
   facet_wrap(~variable, scales = "free") +
   theme_tufte() +
-  theme(axis.text.x = element_blank(),
-        axis.text.y = element_blank())
+  theme(axis.text.y = element_blank(),
+        axis.text.x = element_text(angle = 45))
 ```
 
-```{r continuous features}
+```{r}
+# Explore sparse variables
+home_train[,.N, by = .(Alley, Street)]
+home_test[,.N, by = Utilities]
+home_train[,.N, by = Alley]
+home_train %>% 
+  ggplot(aes(x = MiscFeature)) +
+  geom_bar() +
+  theme_minimal()
 
+# Explore variables of high missingness
+home_train[,summary(PoolArea)]
+home_train[PoolArea != 0, .(.N, mean(SalePrice)), by = PoolQC]
+```
+
+
+```{r continuous features}
+# Correlation matrix
+house_corplot <- home_train[,c(cont_features, y), with = FALSE] %>% 
+  correlate %>% 
+  rearrange() %>% 
+  shave() %>% 
+  rplot()
+  
+house_corplot +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
 ```
 
 
