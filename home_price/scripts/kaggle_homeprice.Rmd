@@ -9,11 +9,14 @@ knitr::opts_chunk$set(fig.width = 20, fig.height = 17)
 require(data.table)
 require(magrittr)
 require(tidyverse)
+require(stringr)
 require(ggthemes)
 require(ggthemr)
+require(GGally)
 require(corrr)
 require(VIM)
 require(h2o)
+require(h2oEnsemble)
 
 # Initialize h2o
 h2o.init()
@@ -24,38 +27,69 @@ home_train <- fread("../data/train.csv")
 home_test <- fread("../data/test.csv")  # Missing response - used for Kaggle submission
 
 names(home_train)
-# Remove id column from home_train
-home_train[,Id := NULL]
 ```
 
 
 ## Introduction
+This data set comes from [this](https://www.kaggle.com/c/house-prices-advanced-regression-techniques) kaggle competition. The data contains 
 ## EDA
-```{r}
+```{r pre processing}
+# Combine data sets with distinction between train and test
+home_train[,split := "train"]
+home_test[,split := "test"]
+home_test[,SalePrice := NA]
+
+home_data <- rbind(home_train, home_test)
+
+# Convert features into proper format based on data_description.txt
+home_data[,c("MSSubClass",
+             "OverallQual",
+             "OverallCond") := list(
+                as.factor(MSSubClass),
+                as.factor(OverallQual),
+                as.factor(OverallCond)
+              )]
+
 # Number of discrete and continuous features
-sapply(home_train, class) %>% 
+sapply(home_data, class) %>% 
   table
 
 # Define dependent variable
 y <- "SalePrice"
 
+# Setnames to be more program friendly
+setnames(home_data, names(home_data)[str_detect(names(home_data), "^[0-9]")], paste0("h", names(home_data)[str_detect(names(home_data), "^[0-9]")]))
+
 # Extract names of continuous features
-cont_features <- names(home_train)[sapply(home_train, class) == "integer"]
-cont_features <- setdiff(cont_features, y)
+cont_features <- names(home_data)[sapply(home_data, class) == "integer"]
+cont_features <- setdiff(cont_features, c(y, "Id"))
 
 # Extract names of discrete features
-disc_features <- names(home_train)[sapply(home_train, class) == "character"]
-
-# Explore missingness of data
-aggr(home_train[,-y, with = FALSE])
+disc_features <- names(home_data)[sapply(home_data, class) %in% c("character", "factor")]
+disc_features <- setdiff(disc_features, "split")
 ```
+
+```{r missingness}
+# Explore missingness of data
+aggr(home_data[,-y, with = FALSE])
+aggr(home_data[split == "test", -y, with = FALSE])
+aggr(home_data[split == "train", -y, with = FALSE])
+```
+There are quite a few columns dominated by missing values. In addition, there are a couple of combinations of missing values in observations that happen rather frequently. In order to help machine learning models pick up on these similar observations, a `missingness` feature will be added to the data to encode the different missingness combinations.
+```{r}
+# Add missingness feature
+home_data[,missingness := "other"]
+home_data[is.na(Alley) & is.na(PoolQC) & is.na(Fence) & is.na(MiscVal), missingness := "one"]
+home_data[is.na(Alley) & is.na(PoolQC) & is.na(Fence) & is.na(MiscVal) & is.na(FireplaceQu), missingness := "two"]
+```
+
 
 ```{r discrete features}
 # Count of distinct values in each discrete feature
-home_train[,disc_features, with = FALSE] %>% 
-  melt(measure.vars = disc_features) %>% 
-  ggplot(aes(x = value)) +
-  geom_bar(na.rm = FALSE) +
+home_data[,c(disc_features, "split"), with = FALSE] %>% 
+  melt(id.vars = "split", measure.vars = disc_features) %>% 
+  ggplot(aes(x = value, fill = split)) +
+  geom_bar(na.rm = FALSE, position = "dodge") +
   facet_wrap(~variable, scales = "free") +
   theme_tufte() +
   theme(axis.text.y = element_blank(),
@@ -64,8 +98,8 @@ home_train[,disc_features, with = FALSE] %>%
 # Boxplot of response variable for discrete features
 give_n <- function(x){ return(c(ymin = median, label = length(x))) }
 
-home_train[,c(disc_features, y), with = FALSE] %>% 
-  melt(measure.vars = disc_features) %>% 
+home_data[split == "train",c(disc_features, y, "split"), with = FALSE] %>% 
+  melt(id.vars = c("split", y), measure.vars = disc_features) %>% 
   ggplot(aes(x = value, y = SalePrice)) +
   geom_boxplot() +
   # stat_summary(fun.data = give_n, geom = "text", fun.y= median) +
@@ -93,7 +127,7 @@ home_train[PoolArea != 0, .(.N, mean(SalePrice)), by = PoolQC]
 
 ```{r continuous features}
 # Correlation matrix
-house_corplot <- home_train[,c(cont_features, y), with = FALSE] %>% 
+house_corplot <- home_data[split == "train",c(cont_features, y), with = FALSE] %>% 
   correlate %>% 
   rearrange() %>% 
   shave() %>% 
@@ -101,12 +135,60 @@ house_corplot <- home_train[,c(cont_features, y), with = FALSE] %>%
   
 house_corplot +
   theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+# Scatter plot pairs
+home_data[split == "train", c(cont_features, y), with = FALSE] %>% 
+  ggpairs()
+```
+
+### Quick Initial Model
+```{r}
+# Move data to h2o (training only needed now)
+fwrite(home_data[split == "train"], "../data/train_data_eng.csv")
+train_h <- h2o.importFile("../data/train_data_eng.csv", destination_frame = "train_h")
+
+home_df_rf <- h2o.randomForest(
+  x = c(cont_features, disc_features),
+  y = y,
+  training_frame = train_h,
+  model_id = "home_df_rf"
+)
+
+h2o.varimp(home_df_rf) %>% 
+  as.data.table %>% 
+  .[,.(variable, scaled_importance = round(scaled_importance, 2), percentage = round(percentage, 2))]
+```
+
+### Random Explorings (DO NOT INCLUDE IN FINAL REPORT)
+```{r}
+# Have home prices changed over time?
+home_data %>% 
+  ggplot(aes(x = SalePrice)) +
+  geom_histogram() +
+  facet_grid(YrSold ~ MoSold) +
+  theme_tufte()
+
+home_data %>% 
+  ggplot(aes(x = as.factor(YrSold), y = SalePrice)) +
+  geom_boxplot() +
+  theme_tufte()
+
+# Slight downward trend in home prices but nothing crazy
+# Time series plot
+home_data[,.(Avg_Sale_Price = mean(SalePrice, na.rm = TRUE)), by = .(YrSold, MoSold)][order(YrSold, MoSold),Avg_Sale_Price] %>% 
+  as.ts(frequency = 12) %>% 
+  plot
+
+home_data[,table(YrSold, MoSold, split)]
 ```
 
 
-
-
 ## Feature Engineering
+```{r}
+# House age at time of sale (YrSold - YearBuilt)
+```
+
+
 ## Data Modeling
 Limited number of observations. Cross validation will be used to maximize training potential.
 ```{r h2o setup}
