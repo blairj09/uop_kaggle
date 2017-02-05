@@ -4,7 +4,7 @@ output: html_notebook
 ---
 
 ```{r setup}
-knitr::opts_chunk$set(fig.width = 15, fig.height = 17)
+knitr::opts_chunk$set(fig.width = 10, fig.height = 8)
 
 require(data.table)
 require(magrittr)
@@ -34,7 +34,7 @@ names(home_train)
 ## Introduction
 This data set comes from [this](https://www.kaggle.com/c/house-prices-advanced-regression-techniques) kaggle competition. The data contains data on home sales in Ames, Iowa, from 2006 - 2010. There are `r ncol(home_train)` features in the data, including the price of the home when it sold (`SalePrice`). The object of the Kaggle competition is to accurately predict `SalePrice` for a predefined test set of homes. We will explore the data to gain understanding and look to expose any underlying patterns before modeling the data and attempting to climb into the top 10% of the Kaggle leaderboard.
 
-## EDA
+## Exploratory Data Analysis
 Before jumping into looking at the data, a few simple pre processing steps are necessary. Some of the numeric features in the data, like quality scores, are actually categorical in nature. We'll transform those features into factors and we'll also identify and separate discrete features from continuous features so they can be examined separately. We'll also combine the data so that we can make easily make comparisons between the test and the train set to check that feature distributions are approximately identical.
 
 ```{r pre processing}
@@ -73,6 +73,7 @@ disc_features <- names(home_data)[sapply(home_data, class) %in% c("character", "
 disc_features <- setdiff(disc_features, "split")
 ```
 
+### Response Variable
 Before jumping into examining the features, it is important to understand the response variable, in this case `SalePrice`. The following histogram illustrates the distribution of `SalePrice` in the data.
 
 ```{r SalePrice eda}
@@ -104,7 +105,10 @@ plot_grid(sp_hist, lsp_hist)
 y2 <- "log_SalePrice"
 ```
 
-The log transformation appeared to help with the skewness of the data so the remainder of the analysis will use `log_SalePrice`. Now, we want to check for missing values. The `VIM` package has some nice functions for visualizing missing values and so we'll use those. Essentially, we want to look for features with a high volumn of missing values and we also want to see if there are prevelant patterns in features that are often missing together. That could indicate a latent variable that isn't being measured but that we could account for with a dummy variable.
+The log transformation appeared to help with the skewness of the data so the remainder of the analysis will use `log_SalePrice`.
+
+### Missingness
+Now, we want to check for missing values. The `VIM` package has some nice functions for visualizing missing values and so we'll use those. Essentially, we want to look for features with a high volumn of missing values and we also want to see if there are prevelant patterns in features that are often missing together. That could indicate a latent variable that isn't being measured but that we could account for with a dummy variable.
 
 ```{r missingness}
 # Explore missingness of data
@@ -120,6 +124,7 @@ home_data[is.na(Alley) & is.na(PoolQC) & is.na(Fence) & is.na(MiscVal), missingn
 home_data[is.na(Alley) & is.na(PoolQC) & is.na(Fence) & is.na(MiscVal) & is.na(FireplaceQu), missingness := "two"]
 ```
 
+### Discrete Features
 Now, we will perform a more in depth examination of the data by looking at discrete features first. We're interested in determining a few things. First, we want to see how many observations there are of each value for each discrete feature. Features that appear to sparse may need to be removed from the data. Second, we want to look at each level of each discrete feature and how it relates to `log_SalePrice` to determine which features provide strong signals for `log_SalePrice`. To address the first point, we will cerate bar plots for each discrete feature. To address the second point, we will look at boxplots for each of the same features.
 
 ```{r discrete features}
@@ -168,10 +173,12 @@ plot_grid(n_heat, lsp_heat)
 
 As can be seen from the heatmaps, the majority of homes are sold with `OverallQual` between 4 and 8 and `OverallCond` between 5 and 7. This pattern remains consistent across test and train data. As expected, average `log_SalePrice` increases as both `OveralQual` and `OverallCond` increase.
 
+### Continuous Features
+Now that we have at least some idea of what is happening with the discrete features, we'll take a look at what is happening with the continuous features. First, we'll look at a correlation plot of each continuous feature to determine the strength of relationship both among features and between featuers and `log_SalePrice`. 
 
 ```{r continuous features}
 # Correlation matrix
-house_corplot <- home_data[split == "train",c(cont_features, y), with = FALSE] %>% 
+house_corplot <- home_data[split == "train",c(cont_features, y2), with = FALSE] %>% 
   correlate %>% 
   rearrange() %>% 
   shave() %>% 
@@ -179,11 +186,58 @@ house_corplot <- home_data[split == "train",c(cont_features, y), with = FALSE] %
   
 house_corplot +
   theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
 
+
+```{r}
+# Scatter plot pairs
+home_data[split == "train", c(cont_features, y), with = FALSE] %>% 
+  cor
+
+home_data$YearBuilt %>% summary
+home_data[,decade_built := cut(YearBuilt, seq(1869, 2019, by = 10), labels = paste0(seq(1870, 2010, by = 10), "s"), include.lowest = TRUE)]
+home_data[,.N, by = decade_built]
+home_data[,length(unique(decade_built))]
+length(seq(1870, 2010, by = 10))
+home_data[,summary(YearBuilt), by = decade_built]
+
+
+home_data[split == "train",.(avg_log_SalePrice = mean(log_SalePrice)), by = .(decade_built, Neighborhood)] %>% 
+  ggplot(aes(x = decade_built, y = avg_log_SalePrice, col = Neighborhood, group = Neighborhood)) +
+  geom_line() +
+  theme_minimal()
+
+home_data[,table(Neighborhood, decade_built)]
+
+home_data[,.N, by = .(Neighborhood, decade_built)] %>% 
+  ggplot(aes(x = decade_built, y = Neighborhood, fill = N)) +
+  geom_raster() +
+  theme_minimal()
+```
+
+
+The correlation plot indicates that several features dealing with the size of the home are strongly correlated with `log_SalePrice`. Many of these features are also correlated with one another. While this would be an issue with general linear models, the statistical methods we will use should handle collinearity well.
+
+```{r}
+treemap::treemap(home_data[split == "train", .(size_var = .N), by = .(decade_built, Neighborhood)], #Your data frame object
+        index=c("Neighborhood", "decade_built"),  #A list of your categorical variables
+        vSize = "size_var",  #This is your quantitative variable
+        type="index", #Type sets the organization and color scheme of your treemap
+        palette = "Set3",  #Select your color palette from the RColorBrewer presets or make your own.
+        title="Sale Price by Neighborhood and Decade Built", #Customize your title
+        fontsize.title = 14, #Change the font size of the title
+        position.legend = 'none'
+        )
+```
+
+
+```{r}
 # Scatter plot pairs
 home_data[split == "train", c(cont_features, y), with = FALSE] %>% 
   ggpairs()
 ```
+
+
 
 ### Quick Initial Model
 ```{r}

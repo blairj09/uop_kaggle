@@ -1,0 +1,342 @@
+---
+title: "Home Price Analysis"
+author: "Mauro Vicic, Peter Begle, Chris Runnels, James Blair"
+date: "February 4, 2017"
+output:
+  html_document:
+    toc: yes
+    theme: paper
+  html_notebook:
+    code_folding: hide
+    theme: flatly
+    toc: yes
+    toc_float: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(fig.width = 10, fig.height = 7, warning = FALSE, message = FALSE)
+
+# Required libraries
+require(data.table)
+require(magrittr)
+require(tidyverse)
+require(ggthemes)
+require(stringr)
+require(cowplot)
+require(corrr)
+require(treemap)
+require(h2o)
+
+if(!require(h2oEnsemble)) devtools::install_github("h2oai/h2o-3/h2o-r/ensemble/h2oEnsemble-package")
+require(h2oEnsemble)
+```
+
+```{r load data}
+# Load data
+home_train <- fread("../data/train.csv")
+home_test <- fread("../data/test.csv")  # Missing response - used for Kaggle submission
+```
+
+## Introduction
+This data set comes from [this](https://www.kaggle.com/c/house-prices-advanced-regression-techniques) kaggle competition. The data contains data on home sales in Ames, Iowa, from 2006 - 2010. There are `r ncol(home_train)` features in the data, including the price of the home when it sold (`SalePrice`). The object of the Kaggle competition is to accurately predict `SalePrice` for a predefined test set of homes.
+
+## Exploratory Data Analysis
+Before jumping into looking at the data, a few simple pre processing steps are necessary. Some of the numeric features in the data, like quality scores, are actually categorical in nature. We'll transform those features into factors and we'll also identify and separate discrete features from continuous features so they can be examined separately. We'll also combine the data so that we can make easily make comparisons between the test and the train set to check that feature distributions are approximately identical between the two.
+
+```{r pre processing, results = 'hide'}
+# Combine data sets with distinction between train and test
+home_train[,split := "train"]
+home_test[,split := "test"]
+home_test[,SalePrice := NA]
+
+home_data <- rbind(home_train, home_test)
+
+# Convert features into proper format based on data_description.txt
+home_data[,c("MSSubClass",
+             "OverallQual",
+             "OverallCond") := list(
+                as.factor(MSSubClass),
+                as.factor(OverallQual),
+                as.factor(OverallCond)
+              )]
+
+# Define dependent variable
+y <- "SalePrice"
+
+# Setnames that begin with a number to be more friendly
+setnames(home_data, names(home_data)[str_detect(names(home_data), "^[0-9]")], paste0("h", names(home_data)[str_detect(names(home_data), "^[0-9]")]))
+
+# Extract names of continuous features
+cont_features <- names(home_data)[sapply(home_data, class) == "integer"]
+cont_features <- setdiff(cont_features, c(y, "Id"))
+
+# Extract names of discrete features
+disc_features <- names(home_data)[sapply(home_data, class) %in% c("character", "factor")]
+disc_features <- setdiff(disc_features, "split")
+```
+
+### Response Variable
+Before jumping into examining the features, it is important to understand the response variable, in this case `SalePrice`. The following histogram illustrates the distribution of `SalePrice`.
+
+```{r SalePrice eda}
+sp_hist <- home_data %>% 
+  ggplot(aes(x = SalePrice)) +
+  geom_histogram() +
+  theme_minimal() +
+  labs(title = "Histogram of Sale Price") +
+  scale_x_continuous(labels = scales::dollar) + #dded to make graph more readable
+  theme(plot.title = element_text(hjust = 0.5)) #beautifying the title
+sp_hist
+```
+
+This histogram clearly indicates the data is right skewed. In an attempt to control for that, we'll look at what the distribution looks like after a log transformation and compare it with the original distribution in the following plot.
+
+```{r log sp, results = 'hide'}
+home_data[,log_SalePrice := log(SalePrice)]
+```
+
+```{r}
+# Histogram of log sale price
+lsp_hist <- home_data %>% 
+  ggplot(aes(x = log_SalePrice)) +
+  geom_histogram() +
+  theme_minimal() +
+  labs(title = "Histogram of log(SalePrice)") +
+  scale_x_continuous(labels = scales::dollar) + #dded to make graph more readable
+  theme(plot.title = element_text(hjust = 0.5)) #beautifying the title
+
+# Side by side comparison of origional distribution with log distribution
+plot_grid(sp_hist, lsp_hist)
+
+# Define y2 as log_SalePrice
+y2 <- "log_SalePrice"
+```
+
+The log transformation appeared to help with the skewness of the data so the remainder of the analysis will use `log_SalePrice`.
+
+### Discrete Features
+Now, we will perform a more in depth examination of the data by looking at discrete features first. We're interested in determining a few things. First, we want to see how many observations there are of each value for each discrete feature. Features that appear to sparse may need to be removed from the data. Second, we want to look at each level of each discrete feature and how it relates to `log_SalePrice` to determine which features provide strong signals for `log_SalePrice`. To address the first point, we will create bar plots for each discrete feature. To address the second point, we will look at box plots for each of the same features.
+
+```{r discrete features, fig.height=25}
+# Count of distinct values in each discrete feature
+disc_bar <- home_data[,c(disc_features, "split"), with = FALSE] %>% 
+  melt(id.vars = "split", measure.vars = disc_features) %>% 
+  ggplot(aes(x = value, fill = split)) +
+  geom_bar(na.rm = FALSE, position = "dodge") +
+  facet_wrap(~variable, scales = "free") +
+  theme_tufte() +
+  theme(axis.text.y = element_blank(),
+        axis.text.x = element_text(angle = 45)) +
+  labs("Discrete Feature Barplots")
+
+# Boxplot of response variable for discrete features
+disc_box <- home_data[split == "train",c(disc_features, y2, "split"), with = FALSE] %>% 
+  melt(id.vars = c("split", y2), measure.vars = disc_features) %>% 
+  ggplot(aes(x = value, y = log_SalePrice)) +
+  geom_boxplot() +
+  facet_wrap(~variable, scales = "free") +
+  theme_tufte() +
+  theme(axis.text.y = element_blank(),
+        axis.text.x = element_text(angle = 45)) +
+  labs("Discrete Feature Boxplots")
+
+plot_grid(disc_bar, disc_box, nrow = 2)
+```
+
+The above plots illustrate some important insights. First, `Street`, `Utlilities`, and `PoolQC` each appear to be rather sparse. However, `PoolQC` does seem to have a strong influence on `log_SalePrice`. There are several additional variables that seem to strongly indicate `logSalePrice`. Specifically, `OverallQual`, `OverallCond` have rather distinct patterns. To determine of these two variable's can be further exploited, we'll look at how they interact with one another. The following heat maps illustrate the interaction between `OverallQual` and `OverallCond`. The heat map on the left illustrates how frequently various combinations of these features occur together while the heat map on the right illustrates the average `log_SalePrice` for each combination.
+
+```{r qual interactions}
+n_heat <- home_data[,.N, by = .(split, OverallQual, OverallCond)] %>% 
+  ggplot(aes(x = OverallQual, y = OverallCond, fill = N)) +
+  geom_raster() +
+  theme_minimal() +
+  labs(title = "Heatmap of OverallCond and OverallQual")
+
+lsp_heat <- home_data[split == "train",.(avg_log_SalePrice = mean(log_SalePrice)), by = .(OverallCond, OverallQual)] %>% 
+  ggplot(aes(x = OverallQual, y = OverallCond, fill = avg_log_SalePrice)) +
+  geom_raster() +
+  theme_minimal() +
+  labs(title = "Heatmap of OverallCond and OverallQual and log_SalePrice")
+
+plot_grid(n_heat, lsp_heat)
+```
+
+As can be seen from the heat maps, the majority of homes are sold with `OverallQual` between 4 and 8 and `OverallCond` between 5 and 7. This pattern remains consistent across test and train data. As expected, average `log_SalePrice` increases as both `OveralQual` and `OverallCond` increase.
+
+### Continuous Features
+Now that we have at least some idea of what is happening with the discrete features, we'll take a look at what is happening with the continuous features. First, we'll look at a correlation plot of each continuous feature to determine the strength of relationship both among features and between features and `log_SalePrice`. 
+
+```{r continuous features, fig.height=8}
+# Correlation matrix
+house_corplot <- home_data[split == "train",c(cont_features, y2), with = FALSE] %>% 
+  correlate %>% 
+  rearrange() %>% 
+  shave() %>% 
+  rplot()
+  
+house_corplot +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+The correlation plot indicates that several features dealing with the size of the home are strongly correlated with `log_SalePrice`. Many of these features are also correlated with one another.
+
+## Hypothesis
+Based on the exploration of the data, one thing we suspect is that certain neighborhoods have distinct build periods. Essentially, we want to investigate if the data demonstrates when neighborhoods were in active construction and if there are clearly defined build periods where neighborhoods were under construction. In order to make this particular analysis a little easier to digest, it's necessary to identify the date the home was built by decade.
+
+```{r, results = "hide"}
+# Create decade_built column
+home_data[,decade_built := cut(YearBuilt, seq(1869, 2019, by = 10), labels = paste0(seq(1870, 2010, by = 10), "s"), include.lowest = TRUE)]
+```
+
+Now that a column has been created that identifies the decade a home was built, we can investigate our hypothesis. We'll create a treemap to investigate the number of homes built in each neighborhood by decade.
+
+```{r}
+treemap(home_data[split == "train", .(size_var = .N), by = .(decade_built, Neighborhood)], #Your data frame object
+        index=c("Neighborhood", "decade_built"),  #A list of your categorical variables
+        vSize = "size_var",  #This is your quantitative variable
+        type="index", #Type sets the organization and color scheme of your treemap
+        palette = "Set3",  #Select your color palette from the RColorBrewer presets or make your own.
+        title="Home Count by Neighborhood and Decade Built", #Customize your title
+        fontsize.title = 14, #Change the font size of the title
+        position.legend = 'none',
+        force.print.labels = TRUE,
+        overlap.labels = 1,
+        align.labels = list(c("center", "top"), c("center", "bottom"))
+        )
+```
+
+This plot reveals some interesting trends in the data. For example, the neighborhood identified by NAmes had homes built in the mid 1900s and then it appears another group of homes built in the 1990s. Other neighborhoods, like NridgHt, only had homes built during a single decade. Some neighborhoods had fairly even home build over a few decades, like SWISU. In any case, it appears our assumption has been validate, at least to a certain extent. There are definite patterns to when certain neighborhoods were built. However, not every neighborhood strictly adheres to a distinct build schedule. Now, it is important to note that this dataset is based on home sales, so a neighborhood may have homes built in a given decade that weren't sold in the time period captured in this dataset. However, if we assume a roughly uniform distribution of home sales across neighborhoods, we can be fairly confident we are capturing the build schedules of each neighborhood.
+
+What about the age of a house? Of course one would assume that a newer house would likely command a higher sale price but some people like the charm of an older home as well. Additionally, homes that are very old tend to be in more established neighborhoods that are more polished and thus, it is possible that they are able to command a high sale price as well, relative to some middle-aged homes. And what about upgrades? It is common real estate knowledge that investing in the kitchen will provide great returns, so maybe homes with a better kitchen quality will have a higher sell price. Let's see if we can uncover these trends.
+
+```{r}
+ggplot(home_data, aes(y =log_SalePrice, x = YearBuilt)) +
+ geom_point(aes(color = KitchenQual), alpha = .5) +
+ geom_smooth(se=FALSE) +
+ theme(plot.title = element_text(hjust = 0.5, size = rel(1.5))) +
+ labs(title = 'Sale Price by Year Built',
+      color = 'Kitchen Quality') +
+   xlab('Year Built') +
+   ylab('Log of Sale Price') +
+  scale_y_continuous(labels = scales::dollar)
+ ```
+
+## Kaggle submission
+In the spirit of competition, lets create a few statistical models with the data and see how we can do on the Kaggle leaderboard. In order to fit models to the data, we need to initialize h2o and load the data in.
+
+```{r modeling, results = 'hide'}
+h2o.init()
+
+fwrite(home_data[split == "train"], "../data/train_data_eng.csv")
+fwrite(home_data[split == "test"], "../data/test_data_eng.csv")
+train_h <- h2o.importFile("../data/train_data_eng.csv", destination_frame = "train_h")
+test_h <- h2o.importFile("../data/test_data_eng.csv", destination_frame = "test_h")
+```
+
+Now that the data is loaded into h2o, we'll create a random forest model, a gradient boosting model, and a deep learning model predicting `log_SalePrice`. Initially, we'll use only the default settings for the models. The Kaggle competition is scored based on [root mean squared logarithmic error](https://www.kaggle.com/wiki/RootMeanSquaredLogarithmicError) (RMSLE). Fortunately, RMSLE is a metric h2o will automatically provide. Since we don't have a huge number of training examples, rather than separate our training data into a test and training set, we'll use cross validation to estimate model generalization. Note, since the random forest algorithm is based off of bootstrap samples, h2o provides out of bag metrics on training data, which essentially serve as cross validated metrics.
+
+```{r, results = 'hide'}
+# Define features to use for prediction
+x <- setdiff(names(train_h), c(y, y2, "Id", "split"))
+
+home_rf <- h2o.randomForest(
+  x = x,
+  y = y2,
+  training_frame = train_h,
+  model_id = "home_rf",
+  seed = 35749
+)
+
+home_gbm <- h2o.gbm(
+  x = x,
+  y = y2,
+  training_frame = train_h,
+  model_id = "home_gbm",
+  nfolds = 5,
+  seed = 35749
+)
+
+home_dl <- h2o.deeplearning(
+  x = x,
+  y = y2,
+  training_frame = train_h,
+  model_id = "home_dl",
+  nfolds = 5,
+  seed = 35749,
+  variable_importances = TRUE
+)
+```
+
+```{r model performance}
+knitr::kable(data.table(algorithm = c("rf", "gbm", "dl"),
+           rmsle = c(home_rf@model$training_metrics@metrics$rmsle,
+                     home_gbm@model$cross_validation_metrics@metrics$rmsle,
+                     home_dl@model$cross_validation_metrics@metrics$rmsle)))
+```
+
+From this, it appears that all three models are in the same ballpark in terms of performance. The gradient boosting machine edges out the other two, but each model could likely benefit from some hyperparameter tuning. Now we'll compare the ten features each model determined to be most important in predicting `log_SalePrice`.
+
+```{r}
+knitr::kable(data.table(rf = as.data.table(h2o.varimp(home_rf))$variable[1:5],
+           gbm = as.data.table(h2o.varimp(home_gbm))$variable[1:5],
+           dl = as.data.table(h2o.varimp(home_dl))$variable[1:5]))
+```
+
+As expected, the random forest and gradient boosting machine are pretty similar in their feature importances. Deep learning picked up on some quirky features, which also is not terribly surprising. Now, we'll build an ensemble model using these three methods and then see how that model performs when the results are submitted to Kaggle. The ensemble we build will take the three models we provide and use a General Linear Model to combine the results. The hope is that the final result will be more accurate than any of the individual model contributions.
+
+```{r ensemble, results = 'hide'}
+home_rf <- h2o.randomForest(
+  x = x,
+  y = y2,
+  training_frame = train_h,
+  model_id = "home_rf",
+  nfolds = 5,
+  fold_assignment = "Modulo",
+  keep_cross_validation_predictions = TRUE,
+  seed = 35749
+)
+
+home_gbm <- h2o.gbm(
+  x = x,
+  y = y2,
+  training_frame = train_h,
+  model_id = "home_gbm",
+  nfolds = 5,
+  fold_assignment = "Modulo",
+  keep_cross_validation_predictions = TRUE,
+  seed = 35749
+)
+
+home_dl <- h2o.deeplearning(
+  x = x,
+  y = y2,
+  training_frame = train_h,
+  model_id = "home_dl",
+  nfolds = 5,
+  fold_assignment = "Modulo",
+  keep_cross_validation_predictions = TRUE,
+  seed = 35749,
+  variable_importances = TRUE
+)
+
+home_models <- list(home_rf, home_gbm, home_dl)
+
+home_ensemble <- h2o.stack(home_models, response_frame = train_h[,y2])
+```
+
+Now that the ensemble is built, we'll use it to predict on the test set for Kaggle submission. It's important to remember that sense we've log transformed the response variable we'll have to undo that before submission.
+
+```{r, results = 'hide'}
+test_pred <- predict.h2o.ensemble(home_ensemble, test_h)
+test_pred <- test_pred$pred %>% as.data.table
+test_id <- test_h$Id %>% as.data.table
+test_pred <- data.table(test_id, SalePrice = exp(test_pred$predict))
+fwrite(test_pred, "../data/test_pred_1.csv")
+```
+
+This particular submission scored in the top 51% of the Kaggle competition at the time of submission. Just to check, we re-ran the models using `SalePrice` instead of `log_SalePrice` and the `log_SalePrice` model performed much better. There is lots of room for improvement. Feature engineering wasn't really explored as much as it could be and a better ensemble could be created using a larger group of models created using grid search.
+
+## Conclusion
+This is a very rich dataset containing lots of detailed information about home sales. Some distinct patterns were discovered in the data, but much more can be done both with data exploration and modeling. It was enlightening working towards scoring well in a Kaggle competition, especially in regards to the role feature engineering can play in a competition. More rigorous work can be done in an effort to climb the Kaggle leaderboard.
+
+
