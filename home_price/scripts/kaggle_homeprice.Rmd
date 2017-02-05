@@ -4,7 +4,7 @@ output: html_notebook
 ---
 
 ```{r setup}
-knitr::opts_chunk$set(fig.width = 20, fig.height = 17)
+knitr::opts_chunk$set(fig.width = 15, fig.height = 17)
 
 require(data.table)
 require(magrittr)
@@ -13,6 +13,7 @@ require(stringr)
 require(ggthemes)
 require(ggthemr)
 require(GGally)
+require(cowplot)
 require(corrr)
 require(VIM)
 require(h2o)
@@ -31,8 +32,11 @@ names(home_train)
 
 
 ## Introduction
-This data set comes from [this](https://www.kaggle.com/c/house-prices-advanced-regression-techniques) kaggle competition. The data contains 
+This data set comes from [this](https://www.kaggle.com/c/house-prices-advanced-regression-techniques) kaggle competition. The data contains data on home sales in Ames, Iowa, from 2006 - 2010. There are `r ncol(home_train)` features in the data, including the price of the home when it sold (`SalePrice`). The object of the Kaggle competition is to accurately predict `SalePrice` for a predefined test set of homes. We will explore the data to gain understanding and look to expose any underlying patterns before modeling the data and attempting to climb into the top 10% of the Kaggle leaderboard.
+
 ## EDA
+Before jumping into looking at the data, a few simple pre processing steps are necessary. Some of the numeric features in the data, like quality scores, are actually categorical in nature. We'll transform those features into factors and we'll also identify and separate discrete features from continuous features so they can be examined separately. We'll also combine the data so that we can make easily make comparisons between the test and the train set to check that feature distributions are approximately identical.
+
 ```{r pre processing}
 # Combine data sets with distinction between train and test
 home_train[,split := "train"]
@@ -69,13 +73,46 @@ disc_features <- names(home_data)[sapply(home_data, class) %in% c("character", "
 disc_features <- setdiff(disc_features, "split")
 ```
 
+Before jumping into examining the features, it is important to understand the response variable, in this case `SalePrice`. The following histogram illustrates the distribution of `SalePrice` in the data.
+
+```{r SalePrice eda}
+sp_hist <- home_data %>% 
+  ggplot(aes(x = SalePrice)) +
+  geom_histogram() +
+  theme_minimal() +
+  labs(title = "Histogram of Sale Price")
+
+sp_hist
+```
+
+This histogram clearly indicates the data is somewhat right skewed. In an attempt to control for that, we'll look at what the distribution looks like after a log transformation and compare it with the original distribution in the following plot.
+
+```{r log sp}
+home_data[,log_SalePrice := log(SalePrice)]
+
+# Histogram of log sale price
+lsp_hist <- home_data %>% 
+  ggplot(aes(x = log_SalePrice)) +
+  geom_histogram() +
+  theme_minimal() +
+  labs(title = "Histogram of log(SalePrice)")
+
+# Side by side comparison of origional distribution with log distribution
+plot_grid(sp_hist, lsp_hist)
+
+# Define y2 as log_SalePrice
+y2 <- "log_SalePrice"
+```
+
+The log transformation appeared to help with the skewness of the data so the remainder of the analysis will use `log_SalePrice`. Now, we want to check for missing values. The `VIM` package has some nice functions for visualizing missing values and so we'll use those. Essentially, we want to look for features with a high volumn of missing values and we also want to see if there are prevelant patterns in features that are often missing together. That could indicate a latent variable that isn't being measured but that we could account for with a dummy variable.
+
 ```{r missingness}
 # Explore missingness of data
-aggr(home_data[,-y, with = FALSE])
-aggr(home_data[split == "test", -y, with = FALSE])
-aggr(home_data[split == "train", -y, with = FALSE])
+aggr(home_data[, -c(y, y2), with = FALSE], combined = TRUE)
 ```
-There are quite a few columns dominated by missing values. In addition, there are a couple of combinations of missing values in observations that happen rather frequently. In order to help machine learning models pick up on these similar observations, a `missingness` feature will be added to the data to encode the different missingness combinations.
+
+There are quite a few columns dominated by missing values. In addition, there are a couple of combinations of missing values in observations that happen rather frequently, possibly an indication of some latent variable. In order to help machine learning models pick up on these similar observations, we'll add a `missingness` feature to the data to encode common missingness combinations.
+
 ```{r}
 # Add missingness feature
 home_data[,missingness := "other"]
@@ -83,46 +120,53 @@ home_data[is.na(Alley) & is.na(PoolQC) & is.na(Fence) & is.na(MiscVal), missingn
 home_data[is.na(Alley) & is.na(PoolQC) & is.na(Fence) & is.na(MiscVal) & is.na(FireplaceQu), missingness := "two"]
 ```
 
+Now, we will perform a more in depth examination of the data by looking at discrete features first. We're interested in determining a few things. First, we want to see how many observations there are of each value for each discrete feature. Features that appear to sparse may need to be removed from the data. Second, we want to look at each level of each discrete feature and how it relates to `log_SalePrice` to determine which features provide strong signals for `log_SalePrice`. To address the first point, we will cerate bar plots for each discrete feature. To address the second point, we will look at boxplots for each of the same features.
 
 ```{r discrete features}
 # Count of distinct values in each discrete feature
-home_data[,c(disc_features, "split"), with = FALSE] %>% 
+disc_bar <- home_data[,c(disc_features, "split"), with = FALSE] %>% 
   melt(id.vars = "split", measure.vars = disc_features) %>% 
   ggplot(aes(x = value, fill = split)) +
   geom_bar(na.rm = FALSE, position = "dodge") +
   facet_wrap(~variable, scales = "free") +
   theme_tufte() +
   theme(axis.text.y = element_blank(),
-        axis.text.x = element_text(angle = 45))
+        axis.text.x = element_text(angle = 45)) +
+  labs("Discrete Feature Barplots")
 
 # Boxplot of response variable for discrete features
-give_n <- function(x){ return(c(ymin = median, label = length(x))) }
-
-home_data[split == "train",c(disc_features, y, "split"), with = FALSE] %>% 
-  melt(id.vars = c("split", y), measure.vars = disc_features) %>% 
-  ggplot(aes(x = value, y = SalePrice)) +
+disc_box <- home_data[split == "train",c(disc_features, y2, "split"), with = FALSE] %>% 
+  melt(id.vars = c("split", y2), measure.vars = disc_features) %>% 
+  ggplot(aes(x = value, y = log_SalePrice)) +
   geom_boxplot() +
-  # stat_summary(fun.data = give_n, geom = "text", fun.y= median) +
   facet_wrap(~variable, scales = "free") +
   theme_tufte() +
   theme(axis.text.y = element_blank(),
-        axis.text.x = element_text(angle = 45))
+        axis.text.x = element_text(angle = 45)) +
+  labs("Discrete Feature Boxplots")
+
+plot_grid(disc_bar, disc_box, nrow = 2)
 ```
 
-```{r}
-# Explore sparse variables
-home_train[,.N, by = .(Alley, Street)]
-home_test[,.N, by = Utilities]
-home_train[,.N, by = Alley]
-home_train %>% 
-  ggplot(aes(x = MiscFeature)) +
-  geom_bar() +
-  theme_minimal()
+The above plots illustrate some important insights. First, `Street`, `Utlilities`, and `PoolQC` each appear to be rather sparse. However, `PoolQC` does seem to have a strong influence on `log_SalePrice`. There are several additional variables that seem to strongly indicate `logSalePrice`. Sepcifically, `OverallQual`, `OverallCond` have rather distinct patterns. To determine of these two variable's can be further exploited, we'll look at how they interact with one another. The following heatmaps illustrate the interaction between `OverallQual` and `OverallCond`. The heatmap on the left illustrates how frequently various combinations of these features occur together while the heatmap on the right illustrates the 
 
-# Explore variables of high missingness
-home_train[,summary(PoolArea)]
-home_train[PoolArea != 0, .(.N, mean(SalePrice)), by = PoolQC]
+```{r qual interactions}
+n_heat <- home_data[,.N, by = .(split, OverallQual, OverallCond)] %>% 
+  ggplot(aes(x = OverallQual, y = OverallCond, fill = N)) +
+  geom_raster() +
+  theme_minimal() +
+  labs(title = "Heatmap of OverallCond and OverallQual")
+
+lsp_heat <- home_data[split == "train",.(avg_log_SalePrice = mean(log_SalePrice)), by = .(OverallCond, OverallQual)] %>% 
+  ggplot(aes(x = OverallQual, y = OverallCond, fill = avg_log_SalePrice)) +
+  geom_raster() +
+  theme_minimal() +
+  labs(title = "Heatmap of OverallCond and OverallQual and log_SalePrice")
+
+plot_grid(n_heat, lsp_heat)
 ```
+
+As can be seen from the heatmaps, the majority of homes are sold with `OverallQual` between 4 and 8 and `OverallCond` between 5 and 7. This pattern remains consistent across test and train data. As expected, average `log_SalePrice` increases as both `OveralQual` and `OverallCond` increase.
 
 
 ```{r continuous features}
@@ -153,6 +197,8 @@ home_df_rf <- h2o.randomForest(
   training_frame = train_h,
   model_id = "home_df_rf"
 )
+
+home_df_rf
 
 h2o.varimp(home_df_rf) %>% 
   as.data.table %>% 
